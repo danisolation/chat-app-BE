@@ -1,9 +1,11 @@
 import app from "./app";
 import http from "http";
-import { Server, Socket } from "socket.io";
+import { Server, type Socket } from "socket.io";
 import jwt from "jsonwebtoken";
 import Message from "./models/Message";
 import User from "./models/User";
+import Group from "./models/Group";
+import Poll from "./models/Poll";
 import { encryptMessage, decryptMessage } from "./utils/encryption";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
@@ -17,7 +19,7 @@ const io = new Server(server, {
   },
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 3000;
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -26,7 +28,7 @@ interface AuthenticatedSocket extends Socket {
 io.use((socket: AuthenticatedSocket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) {
-    return next(new Error("Lỗi xác thực"));
+    return next(new Error("Authentication error"));
   }
 
   try {
@@ -36,12 +38,12 @@ io.use((socket: AuthenticatedSocket, next) => {
     socket.userId = decoded.id;
     next();
   } catch (error) {
-    next(new Error("Lỗi xác thực"));
+    next(new Error("Authentication error"));
   }
 });
 
 io.on("connection", async (socket: AuthenticatedSocket) => {
-  console.log("Một người dùng đã kết nối");
+  console.log("A user has connected");
 
   if (socket.userId) {
     await User.findByIdAndUpdate(socket.userId, { status: "online" });
@@ -52,105 +54,77 @@ io.on("connection", async (socket: AuthenticatedSocket) => {
     socket.join(userId);
   });
 
-  socket.on("sendMessage", async ({ receiverId, content, publicKey }) => {
-    if (socket.userId) {
-      const sender = await User.findById(socket.userId);
-      const receiver = await User.findById(receiverId);
-
-      if (
-        sender &&
-        receiver &&
-        !sender.blockedUsers.includes(receiverId) &&
-        !receiver.blockedUsers.includes(toObjectId(socket.userId))
-      ) {
-        const htmlContent = sanitizeHtml(await marked(content), {
-          allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
-          allowedAttributes: {
-            ...sanitizeHtml.defaults.allowedAttributes,
-            img: ["src", "alt"],
-          },
-        });
-
-        const encryptedContent = await encryptMessage(
-          htmlContent,
-          JSON.parse(receiver.publicKey)
-        );
-
-        const message = new Message({
-          sender: socket.userId,
-          receiver: receiverId,
-          content: encryptedContent,
-        });
-        await message.save();
-
-        io.to(receiverId).emit("newMessage", message);
-      }
-    }
+  socket.on("joinGroup", (groupId: string) => {
+    socket.join(groupId);
   });
 
-  socket.on("editMessage", async ({ messageId, content }) => {
-    if (socket.userId) {
-      const message = await Message.findById(messageId);
-      if (message && message.sender.toString() === socket.userId) {
-        if (!message.originalContent) {
-          message.originalContent = message.content;
+  socket.on(
+    "sendMessage",
+    async ({
+      receiverId,
+      groupId,
+      content,
+      contentType,
+      latitude,
+      longitude,
+      publicKey,
+    }) => {
+      if (socket.userId) {
+        const sender = await User.findById(socket.userId);
+        let receiver, group;
+
+        if (receiverId) {
+          receiver = await User.findById(receiverId);
+        } else if (groupId) {
+          group = await Group.findById(groupId);
         }
-        const htmlContent = sanitizeHtml(await marked(content), {
-          allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
-          allowedAttributes: {
-            ...sanitizeHtml.defaults.allowedAttributes,
-            img: ["src", "alt"],
-          },
-        });
-        message.content = htmlContent;
-        message.editedAt = new Date();
-        await message.save();
 
-        io.to(message.receiver?.toString() || "").emit(
-          "messageEdited",
-          message
-        );
+        if (
+          (sender &&
+            receiver &&
+            !sender.blockedUsers.includes(receiverId) &&
+            !receiver.blockedUsers.includes(toObjectId(socket.userId))) ||
+          (sender && group)
+        ) {
+          let messageContent = content;
+          const messageContentType = contentType || "text";
+
+          if (contentType === "text") {
+            const htmlContent = sanitizeHtml(await marked(content), {
+              allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
+              allowedAttributes: {
+                ...sanitizeHtml.defaults.allowedAttributes,
+                img: ["src", "alt"],
+              },
+            });
+            messageContent = await encryptMessage(
+              htmlContent,
+              JSON.parse(receiver ? receiver.publicKey! : group!.publicKey!)
+            );
+          }
+
+          const message = new Message({
+            sender: socket.userId,
+            receiver: receiverId,
+            group: groupId,
+            content: messageContent,
+            contentType: messageContentType,
+            location:
+              contentType === "location" ? { latitude, longitude } : undefined,
+          });
+          await message.save();
+
+          if (receiverId) {
+            io.to(receiverId).emit("newMessage", message);
+          } else if (groupId) {
+            io.to(groupId).emit("newMessage", message);
+          }
+        }
       }
     }
-  });
+  );
 
-  socket.on("deleteMessage", async ({ messageId }) => {
-    if (socket.userId) {
-      const message = await Message.findById(messageId);
-      if (message && message.sender.toString() === socket.userId) {
-        message.isDeleted = true;
-        message.content = "Tin nhắn này đã bị xóa";
-        await message.save();
-
-        io.to(message.receiver?.toString() || "").emit("messageDeleted", {
-          messageId,
-        });
-      }
-    }
-  });
-
-  socket.on("forwardMessage", async ({ messageId, receiverId, groupId }) => {
-    if (socket.userId) {
-      const originalMessage = await Message.findById(messageId);
-      if (originalMessage) {
-        const forwardedMessage = new Message({
-          sender: socket.userId,
-          receiver: receiverId,
-          group: groupId,
-          content: originalMessage.content,
-          forwardedFrom: originalMessage._id,
-        });
-        await forwardedMessage.save();
-
-        io.to(receiverId || groupId).emit(
-          "newForwardedMessage",
-          forwardedMessage
-        );
-      }
-    }
-  });
-
-  socket.on("markMessageAsRead", async ({ messageId }) => {
+  socket.on("markAsRead", async ({ messageId }) => {
     if (socket.userId) {
       const message = await Message.findByIdAndUpdate(
         messageId,
@@ -167,8 +141,105 @@ io.on("connection", async (socket: AuthenticatedSocket) => {
     }
   });
 
+  socket.on("typing", ({ receiverId, groupId }) => {
+    if (socket.userId) {
+      if (receiverId) {
+        socket.to(receiverId).emit("userTyping", { userId: socket.userId });
+      } else if (groupId) {
+        socket
+          .to(groupId)
+          .emit("userTyping", { userId: socket.userId, groupId });
+      }
+    }
+  });
+
+  socket.on("stopTyping", ({ receiverId, groupId }) => {
+    if (socket.userId) {
+      if (receiverId) {
+        socket
+          .to(receiverId)
+          .emit("userStoppedTyping", { userId: socket.userId });
+      } else if (groupId) {
+        socket
+          .to(groupId)
+          .emit("userStoppedTyping", { userId: socket.userId, groupId });
+      }
+    }
+  });
+
+  socket.on("pinMessage", async ({ messageId }) => {
+    if (socket.userId) {
+      const message = await Message.findById(messageId);
+      if (message) {
+        message.isPinned = !message.isPinned;
+        await message.save();
+
+        if (message.receiver) {
+          io.to(message.receiver.toString()).emit("messagePinned", {
+            messageId,
+            isPinned: message.isPinned,
+          });
+        } else if (message.group) {
+          io.to(message.group.toString()).emit("messagePinned", {
+            messageId,
+            isPinned: message.isPinned,
+          });
+        }
+      }
+    }
+  });
+
+  socket.on(
+    "createPoll",
+    async ({ question, options, expiresAt, isMultipleChoice, groupId }) => {
+      if (socket.userId) {
+        const poll = new Poll({
+          creator: socket.userId,
+          question,
+          options: options.map((option: string) => ({
+            text: option,
+            votes: [],
+          })),
+          expiresAt,
+          isMultipleChoice,
+          group: groupId,
+        });
+        await poll.save();
+
+        const message = new Message({
+          sender: socket.userId,
+          group: groupId,
+          content: question,
+          contentType: "poll",
+          pollId: poll._id,
+        });
+        await message.save();
+
+        io.to(groupId).emit("newPoll", { poll, message });
+      }
+    }
+  );
+
+  socket.on("votePoll", async ({ pollId, optionIndexes }) => {
+    if (socket.userId) {
+      const poll = await Poll.findById(pollId);
+      if (poll) {
+        for (const index of optionIndexes) {
+          if (index >= 0 && index < poll.options.length) {
+            const option = poll.options[index];
+            if (!option.votes.includes(toObjectId(socket.userId))) {
+              option.votes.push(toObjectId(socket.userId));
+            }
+          }
+        }
+        await poll.save();
+        io.to(poll.group.toString()).emit("pollUpdated", poll);
+      }
+    }
+  });
+
   socket.on("disconnect", async () => {
-    console.log("Người dùng đã ngắt kết nối");
+    console.log("A user has disconnected");
     if (socket.userId) {
       await User.findByIdAndUpdate(socket.userId, {
         status: "offline",
@@ -180,5 +251,5 @@ io.on("connection", async (socket: AuthenticatedSocket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Máy chủ đang chạy trên cổng ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });

@@ -111,3 +111,54 @@ export const unblockUser = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Error unblocking user", error });
   }
 };
+
+export const updateProfile = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const { bio, customStatus } = req.body;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { bio, customStatus },
+      { new: true, select: "-password" }
+    );
+
+    if (!user) {
+      res.status(404).json({ message: "User not found" });
+      return;
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    res.status(500).json({ message: "Error updating profile", error });
+  }
+};
+
+export const updateAvatar = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const avatarFile = req.file;
+
+    if (!avatarFile) {
+      res.status(400).json({ message: "No avatar file provided" });
+      return;
+    }
+
+    const avatarUrl = `/uploads/avatars/${avatarFile.filename}`;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { avatar: avatarUrl },
+      { new: true, select: "-password" }
+    );
+
+    if (!user) {
+      res.status(404).json({ message: "User not found" });
+      return;
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    res.status(500).json({ message: "Error updating avatar", error });
+  }
+};

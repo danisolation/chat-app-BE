@@ -9,6 +9,7 @@ export interface IGroup extends Document {
   avatar?: string;
   createdAt: Date;
   updatedAt: Date;
+  publicKey?: string;
 }
 
 const GroupSchema: Schema = new Schema(
@@ -23,6 +24,7 @@ const GroupSchema: Schema = new Schema(
     members: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     admins: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     avatar: { type: String },
+    publicKey: { type: String },
   },
   { timestamps: true }
 );

@@ -15,6 +15,10 @@ import {
   forwardMessage,
   sendVoiceMessage,
   sendLocationMessage,
+  pinMessage,
+  createPoll,
+  votePoll,
+  scheduleMessage,
 } from "../controllers/messageController";
 import { auth } from "../middleware/auth";
 import upload from "../middleware/upload";
@@ -34,9 +38,11 @@ router.get("/search", auth, searchMessages);
 router.put("/:messageId", auth, editMessage);
 router.delete("/:messageId", auth, deleteMessage);
 router.post("/:messageId/forward", auth, forwardMessage);
-
-// Thêm các routes mới
 router.post("/voice", auth, upload.single("voice"), sendVoiceMessage);
 router.post("/location", auth, sendLocationMessage);
+router.post("/:messageId/pin", auth, pinMessage);
+router.post("/poll", auth, createPoll);
+router.post("/poll/vote", auth, votePoll);
+router.post("/schedule", auth, scheduleMessage);
 
 export default router;

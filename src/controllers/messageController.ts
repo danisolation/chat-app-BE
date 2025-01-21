@@ -6,6 +6,8 @@ import { toObjectId } from "../utils/objectId";
 import User from "../models/User";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
+import Group from "../models/Group";
+import Poll, { IPoll } from "../models/Poll";
 
 export const getMessages = async (req: Request, res: Response) => {
   try {
@@ -390,5 +392,158 @@ export const sendLocationMessage = async (req: Request, res: Response) => {
     res.status(201).json(message);
   } catch (error) {
     res.status(500).json({ message: "Lỗi khi gửi vị trí", error });
+  }
+};
+
+export const pinMessage = async (req: Request, res: Response) => {
+  try {
+    const { messageId } = req.params;
+    const userId = (req as any).user.id;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      res.status(404).json({ message: "Message not found" });
+      return;
+    }
+
+    if (message.group) {
+      const group = await Group.findById(message.group);
+      if (!group || !group.admins.includes(userId)) {
+        res.status(403).json({
+          message: "You do not have permission to pin messages in this group",
+        });
+        return;
+      }
+    } else if (
+      message.sender.toString() !== userId &&
+      message.receiver &&
+      message.receiver.toString() !== userId
+    ) {
+      res
+        .status(403)
+        .json({ message: "You do not have permission to pin this message" });
+      return;
+    }
+
+    message.isPinned = !message.isPinned;
+    await message.save();
+
+    res.status(200).json(message);
+  } catch (error) {
+    res.status(500).json({ message: "Error pinning/unpinning message", error });
+  }
+};
+
+export const createPoll = async (req: Request, res: Response) => {
+  try {
+    const { question, options, expiresAt, isMultipleChoice, groupId } =
+      req.body;
+    const creator = (req as any).user.id;
+
+    const poll: IPoll = new Poll({
+      creator,
+      question,
+      options: options.map((option: string) => ({ text: option, votes: [] })),
+      expiresAt,
+      isMultipleChoice,
+      group: groupId,
+    });
+
+    await poll.save();
+
+    const message: IMessage = new Message({
+      sender: creator,
+      group: groupId,
+      content: question,
+      contentType: "poll",
+      pollId: poll._id,
+    });
+
+    await message.save();
+
+    res.status(201).json({ poll, message });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating poll", error });
+  }
+};
+
+export const votePoll = async (req: Request, res: Response) => {
+  try {
+    const { pollId, optionIndexes } = req.body;
+    const userId = (req as any).user.id;
+
+    const poll = await Poll.findById(pollId);
+    if (!poll) {
+      res.status(404).json({ message: "Poll not found" });
+      return;
+    }
+
+    if (poll.expiresAt && new Date() > poll.expiresAt) {
+      res.status(400).json({ message: "This poll has expired" });
+      return;
+    }
+
+    if (!poll.isMultipleChoice && optionIndexes.length > 1) {
+      res.status(400).json({ message: "This poll only allows one choice" });
+      return;
+    }
+
+    for (const index of optionIndexes) {
+      if (index < 0 || index >= poll.options.length) {
+        res.status(400).json({ message: "Invalid option index" });
+        return;
+      }
+
+      const option = poll.options[index];
+      if (!option.votes.includes(userId)) {
+        option.votes.push(userId);
+      }
+    }
+
+    // Remove votes from other options if it's not a multiple choice poll
+    if (!poll.isMultipleChoice) {
+      poll.options.forEach((option, index) => {
+        if (!optionIndexes.includes(index)) {
+          option.votes = option.votes.filter(
+            (vote) => vote.toString() !== userId
+          );
+        }
+      });
+    }
+
+    await poll.save();
+
+    res.status(200).json(poll);
+  } catch (error) {
+    res.status(500).json({ message: "Error voting on poll", error });
+  }
+};
+
+export const scheduleMessage = async (req: Request, res: Response) => {
+  try {
+    const { receiver, group, content, scheduledFor } = req.body;
+    const sender = (req as any).user.id;
+
+    const htmlContent = sanitizeHtml(await marked(content), {
+      allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
+      allowedAttributes: {
+        ...sanitizeHtml.defaults.allowedAttributes,
+        img: ["src", "alt"],
+      },
+    });
+
+    const message: IMessage = new Message({
+      sender,
+      receiver,
+      group,
+      content: htmlContent,
+      scheduledFor: new Date(scheduledFor),
+    });
+
+    await message.save();
+
+    res.status(201).json(message);
+  } catch (error) {
+    res.status(500).json({ message: "Error scheduling message", error });
   }
 };
